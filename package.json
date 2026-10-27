@@ -1,0 +1,21 @@
+{
+  "name": "pregao-swaps",
+  "version": "1.0.0",
+  "description": "Jogo multiplayer de swaps de juros e câmbio para sala de aula",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.22.3",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.4"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}
