@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#232D5F">
+<title>Pregão de Swaps</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="phone">
+  <div class="top">
+    <div style="width:10px;height:10px;background:#00AACA"></div>
+    <h1>Pregão de Swaps</h1>
+    <div class="pts" id="pts"></div>
+  </div>
+  <div id="app"></div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/static/common.js"></script>
+<script>
+const socket = io();
+const app = $("#app");
+const urlCode = (location.pathname.match(/\/j\/([A-Za-z]{4})/) || [])[1] || new URLSearchParams(location.search).get("c") || "";
+let code = urlCode.toUpperCase(), D = null, err = "", joined = false, gar = null;
+const key = () => "swaps-p-" + code;
+
+function tryResume() {
+  const tok = code && lsGet(key());
+  if (!tok) return renderJoin();
+  socket.emit("player:join", { code, token: tok }, (r) => { if (r.ok) joined = true; else renderJoin(); });
+}
+socket.on("connect", tryResume);
+socket.on("player:state", (d) => { D = d; render(); });
+
+function renderJoin() {
+  $("#pts").innerHTML = "";
+  app.innerHTML = `<div class="card">
+    <div class="kicker">Entrar no jogo</div>
+    <h2>Bem-vindo ao pregão!</h2>
+    <p class="muted">Você vai negociar swaps de juros e de câmbio. Digite seu nome (ou o nome do grupo).</p>
+    <label class="small muted" for="c">Código da sala</label>
+    <input id="c" maxlength="4" autocapitalize="characters" value="${esc(code)}" placeholder="ABCD">
+    <label class="small muted" for="n">Seu nome ou grupo</label>
+    <input id="n" maxlength="24" placeholder="Ex.: Ana ou Grupo 3" autocomplete="off">
+    <div class="err">${esc(err)}</div>
+    <button class="btn" id="go">Entrar</button></div>`;
+  $("#go").onclick = () => {
+    code = $("#c").value.trim().toUpperCase();
+    socket.emit("player:join", { code, name: $("#n").value }, (r) => {
+      if (!r.ok) { err = r.error; return renderJoin(); }
+      lsSet(key(), r.token); joined = true; err = "";
+    });
+  };
+}
+
+const ROLE_TXT = {
+  tomador: "Sua empresa vai captar R$ 2 milhões no vencimento, pagando a taxa pré da época. Seu medo: os juros SUBIREM. Proteção: swap ATIVO em DI × PASSIVO em pré, que trava a taxa de hoje.",
+  aplicador: "Seu fundo vai aplicar R$ 2 milhões no vencimento, recebendo a taxa pré da época. Seu medo: os juros CAÍREM. Proteção: swap ATIVO em pré × PASSIVO em DI, que trava a taxa de hoje.",
+  importadora: "Sua empresa vai pagar US$ 400 mil a um fornecedor no vencimento. Seu medo: o dólar SUBIR. Proteção: swap ATIVO em dólar × PASSIVO em DI, que trava o dólar de hoje.",
+  exportadora: "Sua empresa vai receber US$ 400 mil de um cliente no vencimento. Seu medo: o dólar CAIR. Proteção: swap ATIVO em DI × PASSIVO em dólar, que trava o dólar de hoje.",
+  especulador: "Você é a tesouraria de um banco, sem exposição própria. A cada rodada escolhe posições no swap de juros e no swap cambial — e é a contraparte de quem faz hedge.",
+};
+
+function statusCard(me, pub) {
+  const legs = me.role === "especulador" ? [["juros", me.pj], ["cambio", me.pc]] : [[ROLE_MKT[me.role], ROLE_MKT[me.role] === "juros" ? me.pj : me.pc]];
+  return `<div class="card">
+    <div class="row"><span class="tag ${me.role}">${ROLE_NAME[me.role]}</span><span class="grow"></span><span class="small muted">Pré <b style="color:#232D5F">${pct(pub.pre)}</b> · Dólar <b style="color:#007F99">${usdf(pub.usd)}</b></span></div>
+    ${legs.map(([m, n]) => `<h2 style="margin-top:10px;font-size:20px">${legText(m, n)}</h2>`).join("")}
+    ${me.role !== "especulador" && (me.pj || me.pc || me.defaulted) ? `<div class="small muted">${me.garantia ? "Registrado com garantia na B3" : "Bilateral, sem garantia"}</div>` : ""}
+    ${me.defaulted ? `<div class="small neg" style="margin:6px 0"><b>A contraparte do seu swap quebrou.</b> ${me.creditLoss ? "Você perdeu " + brl(me.creditLoss) + " de ganho acumulado e " : "Você "}ficou sem proteção.</div>` : ""}
+    ${me.stopped ? `<div class="small neg" style="margin:6px 0"><b>O comitê de risco encerrou suas posições</b>: a perda passou do limite.</div>` : ""}
+    <div class="kv">
+      <span>Resultado da última rodada</span><b class="${cls(me.lastMtm)}">${sbrl(me.lastMtm)}</b>
+      <span>Resultado acumulado (a receber/pagar no vencimento)</span><b class="${cls(me.mtm)}">${sbrl(me.mtm)}</b>
+      ${me.custos ? `<span>Custo da garantia B3</span><b>${brl(me.custos)}</b>` : ""}
+      ${me.role === "especulador" ? `<span>Capital da tesouraria</span><b>${brl(pub.cfg.specCapital + me.mtm)}</b>` : ""}
+    </div>
+    <p class="small muted" style="margin:8px 0 0">No swap não há ajuste diário: nada é pago agora, só no vencimento.</p></div>`;
+}
+function history(me) {
+  const L = me.log;
+  if (!L.length) return "";
+  return `<div class="card"><div class="kicker">Seu histórico</div>
+    <table class="hist"><tr><th>Rod.</th><th class="num">Pré</th><th class="num">Dólar</th><th class="num">Resultado</th><th class="num">Palp.</th></tr>
+    ${L.map((l) => `<tr><td>${l.round}</td><td class="num">${l.pre.toFixed(2).replace(".", ",")}</td><td class="num">${l.usd.toFixed(2).replace(".", ",")}</td>
+    <td class="num ${cls(l.mtm)}">${num(l.mtm)}</td><td class="num">${l.voted ? l.hits + "/2" : "—"}</td></tr>`).join("")}</table></div>`;
+}
+function voteRow(m, cur) {
+  return `<div class="kicker" style="margin-top:10px">${m === "juros" ? "A taxa pré vai…" : "O dólar vai…"}</div>
+    <div class="vote"><button class="btn up ${cur === "sobe" ? "sel" : ""}" data-vote="sobe" data-m="${m}">▲ SUBIR</button><button class="btn down ${cur === "cai" ? "sel" : ""}" data-vote="cai" data-m="${m}">▼ CAIR</button></div>`;
+}
+function posRow(m, cur, pub) {
+  return `<div class="kicker" style="margin-top:10px">${m === "juros" ? "Swap de juros (DI × pré)" : "Swap cambial (dólar × DI)"}</div>
+    <div class="opts seven">${[-3, -2, -1, 0, 1, 2, 3].map((n) => `<button data-pos="${n}" data-m="${m}" class="${cur === n ? "sel" : ""}">${posLabel(m, n)}</button>`).join("")}</div>
+    <p class="small muted" style="margin:6px 0 0">Agora: <b>${legText(m, cur)}</b>. ${m === "juros" ? "DI = ganha se a pré SUBIR · PRÉ = ganha se a pré CAIR." : "US$ = ganha se o dólar SUBIR · DI = ganha se o dólar CAIR."}</p>`;
+}
+function render() {
+  if (!D) return;
+  const { pub, me } = D;
+  $("#pts").innerHTML = `${esc(me.name)}<b>${me.points} pts</b>`;
+  let h = "";
+  if (pub.phase === "lobby") {
+    h = `<div class="card"><span class="tag ${me.role}">${ROLE_NAME[me.role]}</span><h2 style="margin-top:10px">Você está dentro!</h2>
+      <p>${ROLE_TXT[me.role]}</p><p class="muted small">O professor pode trocar seu papel antes do início. Aguarde o pregão começar…</p></div>`;
+  } else if (pub.phase === "hedge") {
+    if (me.role === "especulador") {
+      h = `<div class="card"><span class="tag especulador">Tesouraria</span><h2 style="margin-top:10px">Prepare sua estratégia</h2>
+        <p>${ROLE_TXT.especulador}</p><p>Capital: <b>${brl(pub.cfg.specCapital)}</b>. Até ${pub.cfg.specMax} contratos em cada swap. Se a perda acumulada passar de ${brl(pub.cfg.specCapital - pub.cfg.stopLevel)}, o comitê de risco encerra as posições.</p>
+        <p class="muted small">Cada 1 p.p. na taxa pré vale ${brl(pub.cfg.dv01)} por contrato. Cada R$ 0,10 no dólar vale ${brl(pub.cfg.usdPerContract * 0.1)} por contrato.</p></div>`;
+    } else {
+      const m = ROLE_MKT[me.role], k = Math.abs(m === "juros" ? me.pj : me.pc);
+      if (gar === null) gar = me.garantia;
+      const leg = { tomador: "ativo em DI × passivo em pré", aplicador: "ativo em pré × passivo em DI", importadora: "ativo em dólar × passivo em DI", exportadora: "ativo em DI × passivo em dólar" }[me.role];
+      h = `<div class="card"><span class="tag ${me.role}">${ROLE_NAME[me.role]}</span><h2 style="margin-top:10px">Quanto proteger?</h2>
+        <p>${ROLE_TXT[me.role]}</p>
+        <p>Hoje: ${m === "juros" ? `taxa pré <b>${pct(pub.pre)}</b>` : `dólar <b>${usdf(pub.usd)}</b>`}. Quantos contratos de swap <b>${leg}</b>?</p>
+        <div class="opts">${[0, 1, 2].map((n) => `<button data-hedge="${n}" class="${me.hedgeChosen && k === n ? "sel" : ""}">${n} contrato${n === 1 ? "" : "s"}<br><span class="small">${n === 0 ? "sem swap" : n === 1 ? "50% protegido" : "100% protegido"}</span></button>`).join("")}</div>
+        <div class="kicker" style="margin-top:14px">Onde registrar?</div>
+        <div class="opts two"><button data-gar="1" class="${gar ? "sel" : ""}">Com garantia B3<br><span class="small">${brl(pub.cfg.garantiaCusto)} por contrato</span></button><button data-gar="0" class="${!gar ? "sel" : ""}">Bilateral<br><span class="small">sem custo, sem garantia</span></button></div>
+        <p class="small muted" style="margin-top:10px">${me.hedgeChosen ? "<b>Decisão registrada — pode mudar até o pregão abrir.</b>" : "Escolha os contratos para registrar a decisão."}</p></div>`;
+    }
+  } else if (pub.phase === "news") {
+    const spec = me.role === "especulador";
+    h = `<div class="card"><div class="kicker">Rodada ${pub.round} de ${pub.totalRounds}</div><h2>${esc(pub.card.titulo)}</h2><p>${esc(pub.card.texto)}</p>
+      ${voteRow("juros", me.voteJ)}${voteRow("cambio", me.voteC)}
+      ${me.voteJ && me.voteC ? '<p class="small muted">Palpites registrados. Aguarde a revelação do choque.</p>' : '<p class="small muted">Cada palpite certo vale 50 pontos.</p>'}</div>
+      ${spec && !me.stopped ? `<div class="card"><div class="kicker">Suas posições para esta rodada</div>${posRow("juros", me.pendJ ?? me.pj, pub)}${posRow("cambio", me.pendC ?? me.pc, pub)}</div>` : ""}
+      ${statusCard(me, pub)}`;
+  } else if (pub.phase === "result") {
+    const lr = me.log.find((l) => l.round === pub.round);
+    h = `${pub.card.credito && me.defaulted && lr && lr.credit !== undefined ? `<div class="card callbox"><h2>Sua contraparte quebrou!</h2><p>O banco do outro lado do seu swap bilateral sofreu intervenção. ${me.creditLoss ? `Os <b>${brl(me.creditLoss)}</b> que você tinha a receber viraram um crédito difícil de recuperar` : "Você não tinha nada a receber, mas"} e, daqui em diante, está <b>sem proteção</b>.</p></div>` : ""}
+      ${lr && lr.stop ? `<div class="card callbox"><h2>Limite de risco estourado</h2><p>A perda acumulada passou do limite e o comitê de risco encerrou suas posições.</p></div>` : ""}
+      <div class="card"><div class="kicker">Rodada ${pub.round} · choque revelado</div>
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap"><div><div class="small muted">Pré</div><div class="bigprice" style="font-size:38px">${pct(pub.pre)}</div><div class="move ${cls(pub.lastPre)}" style="font-size:20px">${dpp(pub.lastPre)}</div></div>
+        <div><div class="small muted">Dólar</div><div class="bigprice" style="font-size:38px;color:#007F99">${usdf(pub.usd)}</div><div class="move ${cls(pub.lastUsd)}" style="font-size:20px">${dusd(pub.lastUsd)}</div></div></div>
+        <p class="${lr && lr.hits ? "pos" : "neg"}" style="font-weight:700">${lr && lr.voted ? (lr.hits === 2 ? "Acertou os dois palpites! +100 pts" : lr.hits === 1 ? "Acertou um palpite: +50 pts" : "Palpites errados desta vez.") : "Você não deu palpite."}</p>
+        <p class="small"><b>Por quê?</b> ${esc(pub.card.porque)}</p></div>
+      ${statusCard(me, pub)}${history(me)}`;
+  } else if (pub.phase === "end") {
+    const r = D.results.rows.find((x) => x.id === me.id) || {};
+    let res = "";
+    if (me.role === "tomador") res = `<p>Você captou R$ 2 mi à taxa do vencimento, <b>${pct(pub.pre)}</b>, e o swap rendeu ${sbrl(r.liquido)}.</p><div class="bigprice" style="font-size:44px">${pct(r.efetivo)}</div><p class="muted small">Custo efetivo da dívida. Quem travou 100% no início pagou ${pct(pub.cfg.startPre)} (mais o custo da garantia).</p>`;
+    else if (me.role === "aplicador") res = `<p>Você aplicou R$ 2 mi à taxa do vencimento, <b>${pct(pub.pre)}</b>, e o swap rendeu ${sbrl(r.liquido)}.</p><div class="bigprice" style="font-size:44px">${pct(r.efetivo)}</div><p class="muted small">Rendimento efetivo. Quem travou 100% no início recebeu ${pct(pub.cfg.startPre)} (menos o custo da garantia).</p>`;
+    else if (me.role === "importadora") res = `<p>Você pagou US$ 400 mil com o dólar a <b>${usdf(pub.usd)}</b>, e o swap rendeu ${sbrl(r.liquido)}.</p><div class="bigprice" style="font-size:44px">${usdf(r.efetivo)}</div><p class="muted small">Dólar efetivo pago. Quem travou 100% no início pagou ${usdf(pub.cfg.startUsd)} (mais o custo da garantia).</p>`;
+    else if (me.role === "exportadora") res = `<p>Você recebeu US$ 400 mil com o dólar a <b>${usdf(pub.usd)}</b>, e o swap rendeu ${sbrl(r.liquido)}.</p><div class="bigprice" style="font-size:44px">${usdf(r.efetivo)}</div><p class="muted small">Dólar efetivo recebido. Quem travou 100% no início recebeu ${usdf(pub.cfg.startUsd)} (menos o custo da garantia).</p>`;
+    else res = `<p>Resultado da tesouraria nos swaps:</p><div class="bigprice ${cls(r.liquido)}" style="font-size:44px">${sbrl(r.liquido)}</div><p class="muted small">Sobre o capital de ${brl(pub.cfg.specCapital)}.</p>`;
+    h = `<div class="card"><div class="kicker">Vencimento · liquidação pela diferença</div><h2>Fim do pregão</h2>${res}
+      ${r.defaulted ? `<p class="small neg"><b>Sua contraparte quebrou no meio do caminho.</b> ${r.creditLoss ? "Você perdeu " + brl(r.creditLoss) + " de ganho acumulado." : ""}</p>` : ""}</div>
+      <div class="card"><div class="kicker">Ranking de analistas</div><h2>${r.rank}º lugar</h2><p>${r.correct} palpite${r.correct === 1 ? "" : "s"} certo${r.correct === 1 ? "" : "s"} · ${r.points} pts</p></div>${history(me)}`;
+  }
+  app.innerHTML = h;
+  app.querySelectorAll("[data-hedge]").forEach((b) => (b.onclick = () => socket.emit("player:hedge", { n: +b.dataset.hedge, garantia: gar !== false })));
+  app.querySelectorAll("[data-gar]").forEach((b) => (b.onclick = () => {
+    gar = b.dataset.gar === "1";
+    const k = Math.abs(ROLE_MKT[me.role] === "juros" ? me.pj : me.pc);
+    if (me.hedgeChosen) socket.emit("player:hedge", { n: k, garantia: gar }); else render();
+  }));
+  app.querySelectorAll("[data-vote]").forEach((b) => (b.onclick = () => socket.emit("player:vote", { m: b.dataset.m, v: b.dataset.vote })));
+  app.querySelectorAll("[data-pos]").forEach((b) => (b.onclick = () => socket.emit("player:position", { m: b.dataset.m, n: +b.dataset.pos })));
+}
+if (!code) renderJoin();
+</script>
+</body>
+</html>

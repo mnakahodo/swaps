@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pregão de Swaps — Professor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="host">
+<header>
+  <div class="sq"></div>
+  <h1>Pregão de Swaps</h1>
+  <div class="meta">
+    <span id="hRound"></span>
+    <span>Pré: <b id="hPre">13,20%</b></span>
+    <span>Dólar: <b id="hUsd">R$ 5,00</b></span>
+    <span>Código: <b id="hCode">····</b></span>
+  </div>
+</header>
+<main id="app"><div class="card">Conectando…</div></main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/static/common.js"></script>
+<script>
+const socket = io();
+let S = null, joinUrl = "", armRestart = false;
+const app = $("#app");
+const act = (type, extra = {}) => socket.emit("host:action", { type, ...extra });
+
+async function computeJoinUrl(code) {
+  let origin = location.origin;
+  if (/^(localhost|127\.)/.test(location.hostname)) {
+    try { const i = await (await fetch("/info")).json(); if (i.ips[0]) origin = `http://${i.ips[0]}:${i.port}`; } catch {}
+  }
+  joinUrl = `${origin}/j/${code}`;
+}
+function boot() {
+  const saved = JSON.parse(lsGet("swaps-host") || "null");
+  const fresh = new URLSearchParams(location.search).has("novo");
+  if (saved && !fresh) {
+    socket.emit("host:resume", saved, (r) => { if (r && r.ok) computeJoinUrl(saved.code).then(render); else create(); });
+  } else create();
+}
+function create() {
+  socket.emit("host:create", {}, async (r) => { lsSet("swaps-host", JSON.stringify(r)); await computeJoinUrl(r.code); render(); });
+}
+socket.on("connect", boot);
+socket.on("host:state", (s) => { S = s; render(); });
+
+function render() {
+  if (!S) return;
+  $("#hCode").textContent = S.code;
+  $("#hPre").textContent = pct(S.pre);
+  $("#hUsd").textContent = usdf(S.usd);
+  $("#hRound").textContent = S.round ? `Rodada ${S.round} de ${S.totalRounds}` : "";
+  const v = { lobby, hedge, news, result, end }[S.phase];
+  app.innerHTML = v();
+  bind();
+}
+
+const ROLE_DESC = {
+  tomador: "Vai captar R$ 2 mi no vencimento à taxa pré da época. Teme a ALTA dos juros.",
+  aplicador: "Vai aplicar R$ 2 mi no vencimento à taxa pré da época. Teme a QUEDA dos juros.",
+  importadora: "Vai pagar US$ 400 mil no vencimento. Teme a ALTA do dólar.",
+  exportadora: "Vai receber US$ 400 mil no vencimento. Teme a QUEDA do dólar.",
+  especulador: "Não tem exposição. Assume risco nos dois swaps para lucrar.",
+};
+function roleCol(role) {
+  const ps = S.list.filter((p) => p.role === role);
+  return `<div><h3><span>${ROLE_SHORT[role]}</span><span class="muted">${ps.length}</span></h3>
+    <div class="small muted" style="margin-bottom:8px">${ROLE_DESC[role]}</div>
+    <div class="chips">${ps.map((p) => `<span class="chip ${p.connected ? "" : "off"}">${esc(p.name)}
+      ${S.phase === "lobby" ? `<button data-role="${p.id}" title="Trocar papel">↻</button><button data-kick="${p.id}" title="Remover">×</button>` : ""}</span>`).join("") || '<span class="muted small">ninguém ainda</span>'}</div></div>`;
+}
+function lobby() {
+  return `<div class="lobby">
+    <div class="card qrbox">
+      <div class="kicker">Aponte a câmera do celular</div>
+      <img src="/qr.svg?u=${encodeURIComponent(joinUrl)}" alt="QR Code para entrar no jogo">
+      <div class="code">${S.code}</div>
+      <div class="url">${esc(joinUrl)}</div>
+    </div>
+    <div class="card">
+      <div class="kicker">Sala de espera</div>
+      <h2 style="font-size:40px;margin:6px 0">${S.players} participante${S.players === 1 ? "" : "s"} conectado${S.players === 1 ? "" : "s"}</h2>
+      <div class="muted">Cada celular pode ser um aluno ou um grupo. Os papéis são distribuídos automaticamente entre quem tem risco de <b>juros</b>, quem tem risco de <b>câmbio</b> e a <b>tesouraria</b> (especulador). Clique em ↻ para trocar o papel de alguém.</div>
+      <div class="roles five">
+        ${["tomador", "aplicador", "importadora", "exportadora", "especulador"].map(roleCol).join("")}
+      </div>
+      <div class="toolbar">
+        <span class="muted">Rodadas:</span>
+        <span class="seg">${[6, 8, 10, 12].map((n) => `<button data-rounds="${n}" class="${S.totalRounds === n ? "on" : ""}">${n}</button>`).join("")}</span>
+        <span class="muted" style="margin-left:12px">Evento de crédito:</span>
+        <span class="seg"><button data-act="credit" class="${S.creditEvent ? "on" : ""}">${S.creditEvent ? "Ligado" : "Desligado"}</button></span>
+        <span class="grow"></span>
+        <button class="btn cyan" data-act="start" ${S.players ? "" : "disabled"}>Começar o jogo →</button>
+      </div>
+    </div></div>`;
+}
+function hedge() {
+  const c = S.cfg;
+  return `<div class="stage">
+    <div class="card news">
+      <div class="kicker">Antes do pregão abrir</div>
+      <h2>Hora de contratar o swap</h2>
+      <p>Hoje a taxa pré de 1 ano está em <b>${pct(S.pre)}</b> e o dólar em <b>${usdf(S.usd)}</b>. Cada contrato tem valor de referência de <b>${brl(c.notional)}</b>.</p>
+      <p><b>Empresa endividada</b>: ativo em DI × passivo em pré (trava o custo da dívida).<br>
+      <b>Fundo de renda fixa</b>: ativo em pré × passivo em DI (trava o rendimento).<br>
+      <b>Importadora</b>: ativo em dólar × passivo em DI (trava o dólar da dívida).<br>
+      <b>Exportadora</b>: ativo em DI × passivo em dólar (trava o dólar da receita).<br>
+      Cada um escolhe 0, 1 ou 2 contratos (0%, 50% ou 100% da exposição).</p>
+      <div class="why"><b>Registro:</b> com garantia na B3 (custo de ${brl(c.garantiaCusto)} por contrato; a B3 é a contraparte central) ou bilateral sem garantia (sem custo, mas com risco de crédito). <b>Swap não tem ajuste diário:</b> o resultado só é pago no vencimento.</div>
+    </div>
+    <div class="card">
+      <div class="kicker">Decisões recebidas</div>
+      <div class="bigprice">${S.hedgeDone}/${S.players}</div>
+      <div class="progress"><div style="width:${S.players ? (100 * S.hedgeDone) / S.players : 0}%"></div></div>
+      <p class="muted">Quem não decidir até a abertura fica <b>sem swap</b>. A <b>tesouraria</b> escolhe as posições a cada rodada, com capital de ${brl(c.specCapital)}.</p>
+      <button class="btn cyan" data-act="open" style="width:100%">Abrir o pregão: rodada 1 →</button>
+    </div></div>`;
+}
+function marketBox(showMove) {
+  return `<div class="row" style="align-items:flex-end;gap:28px;flex-wrap:wrap">
+      <div><div class="kicker">Taxa pré 1 ano</div><div class="bigprice">${pct(S.pre)}</div>${showMove ? `<div class="move ${cls(S.lastPre)}" style="font-size:28px">${dpp(S.lastPre)}</div>` : ""}</div>
+      <div><div class="kicker">Dólar</div><div class="bigprice" style="color:#007F99">${usdf(S.usd)}</div>${showMove ? `<div class="move ${cls(S.lastUsd)}" style="font-size:28px">${dusd(S.lastUsd)}</div>` : ""}</div>
+    </div>
+    <div style="margin-top:14px">${charts(S.history, S.totalRounds, true)}</div>`;
+}
+function news() {
+  const last = S.round === S.totalRounds;
+  return `<div class="stage">
+    <div class="card news">
+      <div class="kicker">Rodada ${S.round}${last ? " · semana do vencimento" : ""} · notícia do mercado</div>
+      <h2>${esc(S.card.titulo)}</h2>
+      <p>${esc(S.card.texto)}</p>
+      <div class="insp">${esc(S.card.inspiracao)}</div>
+      <div class="why"><b>Nos celulares:</b> a taxa pré vai SUBIR ou CAIR? E o dólar? A tesouraria também escolhe as posições.</div>
+    </div>
+    <div class="card">
+      ${marketBox(false)}
+      <div class="stats">
+        <div class="stat">Palpites<b>${S.voted}/${S.players}</b></div>
+        <div class="stat">1 p.p. na pré vale<b>${brl(S.cfg.dv01)}</b><span class="small muted">por contrato</span></div>
+        <div class="stat">R$ 0,10 no dólar vale<b>${brl(S.cfg.usdPerContract * 0.1)}</b><span class="small muted">por contrato</span></div>
+      </div>
+      <div class="progress"><div style="width:${S.players ? (100 * S.voted) / S.players : 0}%"></div></div>
+      <button class="btn cyan" data-act="reveal" style="width:100%;margin-top:16px">Revelar o choque →</button>
+    </div></div>`;
+}
+function result() {
+  const last = S.round >= S.totalRounds;
+  const hitJ = S.list.filter((p) => p.log.some((l) => l.round === S.round && l.voteJ && ((S.lastPre > 0 && l.voteJ === "sobe") || (S.lastPre < 0 && l.voteJ === "cai")))).length;
+  const hitC = S.list.filter((p) => p.log.some((l) => l.round === S.round && l.voteC && ((S.lastUsd > 0 && l.voteC === "sobe") || (S.lastUsd < 0 && l.voteC === "cai")))).length;
+  const hits = S.list.filter((p) => p.log.some((l) => l.round === S.round && (l.credit !== undefined || l.stop)));
+  const alerts = hits.map((p) => { const l = p.log.find((x) => x.round === S.round);
+    return `<div class="alert bad"><span>${esc(p.name)} · ${ROLE_SHORT[p.role]}</span><span>${l.stop ? "limite de risco: posições encerradas" : l.credit > 0 ? "perdeu " + brl(l.credit) + " e a proteção" : "ficou sem proteção"}</span></div>`; }).join("");
+  return `<div class="stage">
+    <div class="card news">
+      <div class="kicker">Rodada ${S.round} · ${S.card.credito ? "evento de crédito" : "resultado"}</div>
+      <h2>${esc(S.card.titulo)}</h2>
+      <div class="why"><b>Por quê?</b> ${esc(S.card.porque)}</div>
+      <div class="stats">
+        <div class="stat">Swap juros (ativo DI) por contrato<b class="${cls(S.lastPre)}">${sbrl(Math.round(S.lastPre * S.cfg.dv01))}</b><span class="small muted">${S.lastPre >= 0 ? "ativo em DI ganha, ativo em pré perde" : "ativo em pré ganha, ativo em DI perde"}</span></div>
+        <div class="stat">Swap cambial (ativo dólar) por contrato<b class="${cls(S.lastUsd)}">${sbrl(Math.round(S.lastUsd * S.cfg.usdPerContract))}</b><span class="small muted">${S.lastUsd >= 0 ? "ativo em dólar ganha" : "passivo em dólar ganha"}</span></div>
+        <div class="stat">Acertos (pré · dólar)<b>${hitJ} · ${hitC}</b><span class="small muted">de ${S.players}</span></div>
+      </div>
+      <p class="small muted" style="margin-top:10px">Valores marcados a mercado: no swap nada é pago agora, só no vencimento.</p>
+      ${alerts ? `<div class="alerts">${alerts}</div>` : ""}
+    </div>
+    <div class="card">
+      ${marketBox(true)}
+      <button class="btn cyan" data-act="next" style="width:100%;margin-top:16px">${last ? "Liquidar no vencimento e ver resultados →" : `Próxima rodada (${S.round + 1}) →`}</button>
+    </div></div>`;
+}
+function end() {
+  const R = S.results, rows = R.rows;
+  const by = (r) => rows.filter((x) => x.role === r);
+  const tag = (x) => (x.defaulted ? ' <span class="small neg">(contraparte quebrou)</span>' : "") + (x.hedge && !x.garantia ? ' <span class="small muted">sem garantia</span>' : "");
+  const hedgeT = (r, label, unit) => `<table><tr><th>${label}</th><th class="num">Contratos</th><th class="num">Swap (líquido)</th><th class="num">${unit === "%" ? "Taxa efetiva" : "Dólar efetivo"}</th></tr>
+    ${by(r).map((x) => `<tr><td>${esc(x.name)}${tag(x)}</td><td class="num">${x.hedge}</td>
+    <td class="num ${cls(x.liquido)}">${sbrl(x.liquido)}</td><td class="num"><b>${unit === "%" ? pct(x.efetivo) : usdf(x.efetivo)}</b></td></tr>`).join("") || '<tr><td colspan="4" class="muted">—</td></tr>'}</table>`;
+  const sp = by("especulador");
+  const tom = by("tomador"), full = tom.filter((x) => x.hedge === 2 && !x.defaulted), none = tom.filter((x) => !x.hedge);
+  const defs = rows.filter((x) => x.defaulted);
+  const sum = rows.reduce((a, x) => a + x.mtm, 0);
+  const lessons = [
+    `A taxa pré foi de <b>${pct(R.startPre)}</b> para <b>${pct(R.finalPre)}</b> e o dólar de <b>${usdf(R.startUsd)}</b> para <b>${usdf(R.finalUsd)}</b>.`,
+    full.length ? `Empresas endividadas com swap de 100% pagaram <b>${pct(full[0].efetivo)}</b>: a taxa inicial travada (mais o custo da garantia), qualquer que tenha sido o caminho dos juros.` : "Nenhuma empresa endividada manteve swap de 100% até o fim: o custo de todas dependeu do mercado.",
+    none.length ? `Quem ficou sem swap pagou a taxa do vencimento, <b>${pct(R.finalPre)}</b>: ${R.finalPre <= R.startPre ? "desta vez o mercado ajudou, mas foi sorte — o risco era o mesmo." : "os juros subiram e o custo veio inteiro."}` : "",
+    R.creditHappened ? (defs.length ? `<b>${defs.length}</b> participante${defs.length === 1 ? "" : "s"} com swap bilateral sem garantia ${defs.length === 1 ? "ficou" : "ficaram"} sem a proteção quando a contraparte quebrou. O ganho acumulado virou crédito contra um banco em intervenção.` : "Houve evento de crédito, mas ninguém tinha swap bilateral sem garantia: todos estavam protegidos pela B3.") : "",
+    `Durante o jogo ninguém pagou nem recebeu nada: no swap <b>não existe ajuste diário</b>. Todo o resultado é liquidado pela diferença no vencimento — por isso o risco de crédito se concentra no fim.`,
+    `Para cada ponta ativa existe uma ponta passiva: no mercado como um todo, os resultados somam <b>zero</b>. O swap transfere risco, não cria dinheiro. Na turma, a soma foi ${brl(sum)}; a diferença ficou com contrapartes de fora da sala.`,
+  ].filter(Boolean);
+  return `<div class="endgrid">
+    <div class="card"><div class="kicker">Vencimento</div><h2 style="font-size:40px;margin:6px 0 10px">O que aprendemos</h2>
+      <ul class="lessons">${lessons.map((l) => `<li>${l}</li>`).join("")}</ul>
+      <div style="margin-top:12px">${charts(S.history, S.totalRounds, true)}</div></div>
+    <div class="card"><div class="kicker">Ranking de analistas (palpites certos)</div>
+      <table><tr><th>#</th><th>Participante</th><th>Papel</th><th class="num">Acertos</th><th class="num">Pontos</th></tr>
+      ${rows.slice(0, 12).map((x) => `<tr><td>${x.rank}</td><td>${esc(x.name)}</td><td><span class="tag ${x.role}">${ROLE_SHORT[x.role]}</span></td><td class="num">${x.correct}</td><td class="num"><b>${x.points}</b></td></tr>`).join("")}</table></div>
+    <div class="card"><div class="kicker">Empresas endividadas · custo da dívida</div>${hedgeT("tomador", "Empresa", "%")}</div>
+    <div class="card"><div class="kicker">Fundos de renda fixa · rendimento</div>${hedgeT("aplicador", "Fundo", "%")}</div>
+    <div class="card"><div class="kicker">Importadoras · dólar pago</div>${hedgeT("importadora", "Importadora", "R$")}</div>
+    <div class="card"><div class="kicker">Exportadoras · dólar recebido</div>${hedgeT("exportadora", "Exportadora", "R$")}</div>
+    <div class="card"><div class="kicker">Tesourarias · resultado</div>
+      <table><tr><th>Tesouraria</th><th class="num">Resultado</th><th class="num">Capital final</th></tr>
+      ${sp.sort((a, b) => b.liquido - a.liquido).map((x) => `<tr><td>${esc(x.name)}${x.stopped ? ' <span class="small neg">(limite de risco)</span>' : ""}</td><td class="num ${cls(x.liquido)}"><b>${sbrl(x.liquido)}</b></td><td class="num">${brl(x.saldoFinal)}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">—</td></tr>'}</table></div>
+    <div class="card"><div class="kicker">Debate</div>
+      <ul class="lessons"><li>A empresa que “perdeu” no swap porque os juros caíram fez um mau negócio?</li><li>Valeu a pena pagar pela garantia da B3?</li><li>Por que o risco de crédito do swap é maior que o do mercado futuro?</li></ul>
+      <div class="toolbar"><button class="btn ${armRestart ? "" : "ghost"}" data-act="restart">${armRestart ? "Confirmar: zerar e voltar à sala de espera" : "Jogar de novo com a mesma turma"}</button><a class="btn ghost" href="/professor?novo=1" style="text-decoration:none">Nova sala</a></div></div>
+  </div>`;
+}
+function bind() {
+  app.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => {
+    if (b.dataset.act === "restart" && !armRestart) { armRestart = true; return render(); }
+    armRestart = false;
+    act(b.dataset.act);
+  }));
+  app.querySelectorAll("[data-rounds]").forEach((b) => (b.onclick = () => act("rounds", { value: +b.dataset.rounds })));
+  app.querySelectorAll("[data-role]").forEach((b) => (b.onclick = () => act("role", { id: b.dataset.role })));
+  app.querySelectorAll("[data-kick]").forEach((b) => (b.onclick = () => act("kick", { id: b.dataset.kick })));
+}
+</script>
+</body>
+</html>
